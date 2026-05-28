@@ -1,0 +1,10 @@
+# MATLAB autosave
+*.asv
+
+# Generated figures (large, can be regenerated)
+*.png
+*.jpg
+*.fig
+
+# MATLAB temporary
+*.m~
