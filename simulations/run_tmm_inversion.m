@@ -89,6 +89,12 @@ function run_tmm_inversion()
     popSize = 60;
     maxIter = 400;
 
+    % ====== MCMC Settings ======
+    n_chains  = 4;
+    n_burnin  = 5000;
+    n_samples_mcmc = 20000;
+    adapt_int = 500;
+
     % ====== Process Each Sample ======
     fprintf('%-25s %10s %10s %12s %8s\n', ...
         'Sample', 'eps_inf_E', 'eps_inf_L', 'f_relax(GHz)', 'RMS(dB)');
@@ -136,10 +142,7 @@ function run_tmm_inversion()
             popSize, maxIter, c0, Z0);
 
         % ---- MCMC: 4-chain adaptive Metropolis-Hastings ----
-        n_chains  = 4;
-        n_burnin  = 5000;
-        n_samples_mcmc = 20000;
-        adapt_int = 500;
+        % (n_chains, n_burnin, n_samples_mcmc, adapt_int defined before parfor)
 
         rng_state = rng;
         init_x = repmat(p_de, n_chains, 1) .* ...
