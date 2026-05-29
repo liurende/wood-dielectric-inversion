@@ -87,7 +87,7 @@ function run_tmm_inversion()
         'Sample', 'eps_inf_E', 'eps_inf_L', 'f_relax(GHz)', 'RMS(dB)');
     fprintf('%s\n', repmat('-', 1, 75));
 
-    results = struct();
+    results_arr = cell(length(matFiles), 1);
 
     for iF = 1:length(matFiles)
         fname = matFiles(iF).name;
@@ -121,35 +121,121 @@ function run_tmm_inversion()
         S_mag_sm = sgolayfilt(abs(S_fit), 2, wlen);
         S_fit_sm = S_mag_sm .* exp(1j * angle(S_fit));
 
-        % ---- DE Optimization (3-param TMM + Debye) ----
+        % ---- DE Optimization (3-param TMM + Debye, phase-enriched) ----
         rng(iF * 100);
-        [p_best, loss_curve] = tmm_debye_invert(...
+        [p_de, loss_curve] = tmm_debye_invert(...
             S_fit_sm, f_fit, lb3, ub3, ...
             delta_eps_E, delta_eps_L, d_E, d_L, N_pairs, ...
             popSize, maxIter, c0, Z0);
 
-        eps_inf_E = p_best(1);
-        eps_inf_L = p_best(2);
-        f_relax   = p_best(3);
+        % ---- MCMC: 4-chain adaptive Metropolis-Hastings ----
+        n_chains  = 4;
+        n_burnin  = 5000;
+        n_samples_mcmc = 20000;
+        adapt_int = 500;
 
-        % Compute best-fit S21
+        rng_state = rng;
+        init_x = repmat(p_de, n_chains, 1) .* ...
+            (1 + 0.02 * randn(n_chains, 3));
+        init_x = max(lb3, min(ub3, init_x));
+        rng(rng_state);
+
+        mag_meas_dB = 20 * log10(max(abs(S_fit_sm), 1e-12));
+        phase_meas  = angle(S_fit_sm);
+
+        lp_fn = @(x, lb, ub) log_prior_tmm3(x, lb, ub);
+        ll_fn = @(x) log_like_tmm3(x, f_fit, mag_meas_dB, phase_meas, ...
+            delta_eps_E, delta_eps_L, d_E, d_L, N_pairs, c0, Z0);
+
+        [mcmc_chains, mcmc_diag] = mcmc_sampler(lp_fn, ll_fn, ...
+            init_x, lb3, ub3, n_burnin, n_samples_mcmc, adapt_int);
+
+        posterior = [];
+        for c = 1:n_chains
+            posterior = [posterior; mcmc_chains{c}];
+        end
+
+        % ---- Store ----
+        eps_inf_E = p_de(1);
+        eps_inf_L = p_de(2);
+        f_relax   = p_de(3);
+
         S21_model = tmm_debye_S21(eps_inf_E, eps_inf_L, f_relax, ...
             delta_eps_E, delta_eps_L, d_E, d_L, N_pairs, f_fit, c0, Z0);
         rms_val = sqrt(mean((20*log10(abs(S21_model)) - 20*log10(abs(S_fit_sm))).^2));
 
-        % ---- Store ----
-        results(iF).name       = baseName;
-        results(iF).eps_inf_E  = eps_inf_E;
-        results(iF).eps_inf_L  = eps_inf_L;
-        results(iF).f_relax    = f_relax;
-        results(iF).rms        = rms_val;
-        results(iF).f_fit      = f_fit;
-        results(iF).S_meas     = S_fit_sm;
-        results(iF).S_model    = S21_model;
-        results(iF).loss_curve = loss_curve;
+        % Store results in a temporary struct for parfor compatibility
+        tmp = struct();
+        tmp.name       = baseName;
+        tmp.eps_inf_E  = eps_inf_E;
+        tmp.eps_inf_L  = eps_inf_L;
+        tmp.f_relax    = f_relax;
+        tmp.rms        = rms_val;
+        tmp.f_fit      = f_fit;
+        tmp.S_meas     = S_fit_sm;
+        tmp.S_model    = S21_model;
+        tmp.loss_curve = loss_curve;
+        tmp.post_mean  = mean(posterior, 1);
+        tmp.post_hdi_lo = quantile(posterior, 0.025, 1);
+        tmp.post_hdi_hi = quantile(posterior, 0.975, 1);
+        tmp.rhat       = mcmc_diag.rhat;
+        tmp.accept_rate = mcmc_diag.acceptance_sampling;
+        tmp.mcmc_chains = mcmc_chains;
+        results_arr{iF} = tmp;
 
         fprintf('%-25s %10.2f %10.2f %12.1f %8.3f\n', ...
             baseName, eps_inf_E, eps_inf_L, f_relax/1e9, rms_val);
+    end
+
+    % Filter out empty cells (samples that were skipped)
+    results_arr = results_arr(~cellfun('isempty', results_arr));
+    results = [results_arr{:}];
+
+    % Define texture pairs (used by posterior summary and FIGURE 2)
+    pairs_cfg = {{'0_垂直', '0_平行'}, {'1_垂直', '1_平行'}};
+    pair_titles = {'Large Wood', 'Small Wood'};
+
+    % =================================================================
+    % MCMC Posterior Summary
+    % =================================================================
+    fprintf('\n=============== MCMC Posterior Summary ===============\n');
+    fprintf('%-22s %-28s %-28s %-28s %6s\n', ...
+        'Sample', 'eps_inf_E (95%% HDI)', 'eps_inf_L (95%% HDI)', ...
+        'f_relax GHz (95%% HDI)', 'R-hat');
+    fprintf('%s\n', repmat('-', 1, 115));
+    for iF = 1:length(results)
+        rr = results(iF);
+        fprintf('%-22s %6.2f [%5.2f, %5.2f]  %6.2f [%5.2f, %5.2f]  %5.1f [%4.1f, %4.1f]    %5.3f\n', ...
+            rr.name, ...
+            rr.post_mean(1), rr.post_hdi_lo(1), rr.post_hdi_hi(1), ...
+            rr.post_mean(2), rr.post_hdi_lo(2), rr.post_hdi_hi(2), ...
+            rr.post_mean(3)/1e9, rr.post_hdi_lo(3)/1e9, rr.post_hdi_hi(3)/1e9, ...
+            max(rr.rhat));
+        fprintf('    Sampling acceptance: [%.2f %.2f %.2f %.2f]\n', rr.accept_rate);
+    end
+
+    fprintf('\n--- Texture Anisotropy (Posterior Means) ---\n');
+    for iPair = 1:2
+        vert_name = pairs_cfg{iPair}{1};
+        para_name = pairs_cfg{iPair}{2};
+        vert_mean = []; para_mean = [];
+        for iF = 1:length(results)
+            if strcmp(results(iF).name, vert_name)
+                vert_mean = results(iF).post_mean;
+            end
+            if strcmp(results(iF).name, para_name)
+                para_mean = results(iF).post_mean;
+            end
+        end
+        if ~isempty(vert_mean) && ~isempty(para_mean)
+            fprintf('%s:\n', pair_titles{iPair});
+            fprintf('  eps_inf_E: %.2f vs %.2f (delta=%.2f)\n', ...
+                vert_mean(1), para_mean(1), vert_mean(1)-para_mean(1));
+            fprintf('  eps_inf_L: %.2f vs %.2f (delta=%.2f)\n', ...
+                vert_mean(2), para_mean(2), vert_mean(2)-para_mean(2));
+            fprintf('  f_relax:   %.1f vs %.1f GHz (delta=%.1f)\n', ...
+                vert_mean(3)/1e9, para_mean(3)/1e9, (vert_mean(3)-para_mean(3))/1e9);
+        end
     end
 
     % =================================================================
@@ -189,8 +275,6 @@ function run_tmm_inversion()
     % =================================================================
     fig2 = figure('Color', 'w', 'Position', [50, 100, 1000, 420]);
 
-    pairs_cfg = {{'0_垂直', '0_平行'}, {'1_垂直', '1_平行'}};
-    pair_titles = {'Large Wood', 'Small Wood'};
     colors  = {[0.29 0.49 0.73], [0.86 0.65 0.23]};
 
     for iPair = 1:2
@@ -265,9 +349,20 @@ function run_tmm_inversion()
         end
     end
 
-    save(fullfile(outDir, 'TMM_Inversion_Results.mat'), 'results', ...
-        'd_total', 'd_E_mm', 'd_L_mm', 'N_pairs', 'delta_eps_E', 'delta_eps_L');
-    fprintf('\nResults saved to: %s\n', fullfile(outDir, 'TMM_Inversion_Results.mat'));
+    % =================================================================
+    % Posterior Visualization
+    % =================================================================
+    try
+        plot_posterior(results, outDir, fontName, ...
+            delta_eps_E, delta_eps_L, d_E, d_L, N_pairs, c0, Z0);
+    catch ME
+        warning('plot_posterior not yet available: %s', ME.message);
+    end
+
+    save(fullfile(outDir, 'MCMC_Inversion_Results.mat'), 'results', ...
+        'd_total', 'd_E_mm', 'd_L_mm', 'N_pairs', 'delta_eps_E', 'delta_eps_L', ...
+        'n_burnin', 'n_samples_mcmc', 'n_chains');
+    fprintf('\nResults saved to: %s\n', fullfile(outDir, 'MCMC_Inversion_Results.mat'));
 end
 
 %% ==================== TMM + DEBYE FORWARD MODEL ====================
@@ -279,17 +374,17 @@ function [best_x, loss_curve] = tmm_debye_invert(S_meas, f, lb, ub, ...
         delta_eps_E, delta_eps_L, d_E, d_L, N_pairs, ...
         popSize, maxIter, c0, Z0)
     % Differential Evolution for 3-parameter TMM+Debye model.
-    % X = [eps_inf_E, eps_inf_L, f_relax]
+    % Uses phase-enriched cost function (magnitude + phase).
 
     D = 3;
     mag_meas_dB = 20 * log10(max(abs(S_meas), 1e-12));
+    phase_meas  = angle(S_meas);
 
-    % Latin Hypercube initialization
     X = repmat(lb, popSize, 1) + lhsdesign(popSize, D) .* repmat(ub - lb, popSize, 1);
 
     cost = zeros(popSize, 1);
     for i = 1:popSize
-        cost(i) = cost_tmm3(X(i,:), f, mag_meas_dB, ...
+        cost(i) = cost_tmm3_phase(X(i,:), f, mag_meas_dB, phase_meas, ...
             delta_eps_E, delta_eps_L, d_E, d_L, N_pairs, c0, Z0);
     end
 
@@ -302,12 +397,10 @@ function [best_x, loss_curve] = tmm_debye_invert(S_meas, f, lb, ub, ...
 
     for iter = 1:maxIter
         for i = 1:popSize
-            % DE/rand/1 mutation
             candidates = setdiff(1:popSize, i);
             r = candidates(randperm(length(candidates), 3));
             v = X(r(1), :) + F * (X(r(2), :) - X(r(3), :));
 
-            % Binomial crossover
             j_rand = randi(D);
             u = X(i, :);
             for j = 1:D
@@ -316,11 +409,9 @@ function [best_x, loss_curve] = tmm_debye_invert(S_meas, f, lb, ub, ...
                 end
             end
 
-            % Boundary reflection
             u = max(lb, min(ub, u));
 
-            % Selection
-            cost_u = cost_tmm3(u, f, mag_meas_dB, ...
+            cost_u = cost_tmm3_phase(u, f, mag_meas_dB, phase_meas, ...
                 delta_eps_E, delta_eps_L, d_E, d_L, N_pairs, c0, Z0);
             if cost_u < cost(i)
                 X(i, :) = u;
@@ -333,23 +424,6 @@ function [best_x, loss_curve] = tmm_debye_invert(S_meas, f, lb, ub, ...
         end
         loss_curve(iter) = best_cost;
     end
-end
-
-function J = cost_tmm3(x, f, mag_meas_dB, ...
-        delta_eps_E, delta_eps_L, d_E, d_L, N_pairs, c0, Z0)
-    % Cost function: Huber loss on |S21| magnitude
-
-    S21 = tmm_debye_S21(x(1), x(2), x(3), ...
-        delta_eps_E, delta_eps_L, d_E, d_L, N_pairs, f, c0, Z0);
-
-    mag_err = 20*log10(max(abs(S21), 1e-12)) - mag_meas_dB;
-
-    % Huber loss: quadratic for small errors, linear for large
-    L = mag_err.^2;
-    mask = abs(mag_err) > 1.0;
-    L(mask) = 2.0 * abs(mag_err(mask)) - 1.0;
-
-    J = mean(L);
 end
 
 %% ==================== CSV DATA LOADER ====================
