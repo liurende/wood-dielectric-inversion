@@ -21,26 +21,3 @@ function J = cost_tmm3_phase(x, f, mag_meas_dB, phase_meas, ...
 
     J = 0.6 * mean(L_mag) + 0.4 * mean(L_phase);
 end
-
-function lp = log_prior_tmm3(x, lb, ub)
-    % Log-prior for TMM 3-parameter model.
-    % Uniform on eps_inf_E, eps_inf_L within [lb(1:2), ub(1:2)].
-    % Log-uniform on f_relax within [lb(3), ub(3)]: p(x) ~ 1/x.
-
-    if any(x < lb) || any(x > ub)
-        lp = -inf;
-        return;
-    end
-    lp = -log(x(3));  % log-uniform prior on f_relax
-end
-
-function ll = log_like_tmm3(x, f, mag_meas_dB, phase_meas, ...
-        delta_eps_E, delta_eps_L, d_E, d_L, N_pairs, c0, Z0)
-    % Log-likelihood for MCMC.
-    % ll = -J, where J is the phase-enriched cost.
-    % Constants (sigma, 2*pi) cancel in M-H acceptance ratio.
-
-    J = cost_tmm3_phase(x, f, mag_meas_dB, phase_meas, ...
-        delta_eps_E, delta_eps_L, d_E, d_L, N_pairs, c0, Z0);
-    ll = -J;
-end

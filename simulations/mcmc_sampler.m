@@ -13,12 +13,14 @@ function [chains, diagnostics] = mcmc_sampler(log_prior_fn, log_like_fn, ...
     %
     % Outputs:
     %   chains      -- cell array {n_chains}(n_samples, D)
-    %   diagnostics -- struct with .rhat (1xD) and .acceptance (n_chainsx1)
+    %   diagnostics -- struct with .rhat (1xD), .acceptance_burnin, .acceptance_sampling
 
     [n_chains, D] = size(init_x);
+    assert(n_chains >= 2, 'mcmc_sampler requires at least 2 chains for R-hat diagnostics.');
     total_iter = n_burnin + n_samples;
     chains = cell(n_chains, 1);
-    acceptance = zeros(n_chains, 1);
+    acceptance_burnin  = zeros(n_chains, 1);
+    acceptance_sampling = zeros(n_chains, 1);
 
     for c = 1:n_chains
         x_curr = init_x(c, :);
@@ -42,20 +44,15 @@ function [chains, diagnostics] = mcmc_sampler(log_prior_fn, log_like_fn, ...
 
         % Initial proposal: diagonal covariance (small steps)
         prop_cov = diag(((ub - lb) * 0.01).^2);
-        n_accept = 0;
+        n_accept_burnin  = 0;
+        n_accept_sampling = 0;
 
         for t = 2:total_iter
             % Propose from multivariate Gaussian
             x_prop = mvnrnd(x_curr, prop_cov);
 
-            % Bounce off boundaries
-            below = x_prop < lb;
-            above = x_prop > ub;
-            x_prop(below) = 2 * lb(below) - x_prop(below);
-            x_prop(above) = 2 * ub(above) - x_prop(above);
-            x_prop = min(ub, max(lb, x_prop));
-
-            % Metropolis-Hastings
+            % Metropolis-Hastings (out-of-bounds proposals rejected
+            % naturally by log-prior returning -inf — preserves symmetry)
             lp_prop = log_prior_fn(x_prop, lb, ub);
             if isfinite(lp_prop)
                 ll_prop = log_like_fn(x_prop);
@@ -64,7 +61,11 @@ function [chains, diagnostics] = mcmc_sampler(log_prior_fn, log_like_fn, ...
                     x_curr = x_prop;
                     lp_curr = lp_prop;
                     ll_curr = ll_prop;
-                    n_accept = n_accept + 1;
+                    if t <= n_burnin
+                        n_accept_burnin = n_accept_burnin + 1;
+                    else
+                        n_accept_sampling = n_accept_sampling + 1;
+                    end
                 end
             end
 
@@ -81,31 +82,45 @@ function [chains, diagnostics] = mcmc_sampler(log_prior_fn, log_like_fn, ...
 
         % Discard burn-in
         chains{c} = chain((n_burnin + 1):end, :);
-        acceptance(c) = n_accept / total_iter;
+        acceptance_burnin(c)  = n_accept_burnin / (n_burnin - 1);
+        acceptance_sampling(c) = n_accept_sampling / n_samples;
     end
 
-    % Gelman-Rubin R-hat diagnostic
-    diagnostics = compute_rhat(chains);
-    diagnostics.acceptance = acceptance;
+    % Split-R-hat diagnostic (Vehtari et al., 2021)
+    diagnostics = compute_split_rhat(chains);
+    diagnostics.acceptance_burnin  = acceptance_burnin;
+    diagnostics.acceptance_sampling = acceptance_sampling;
 end
 
-function diagnostics = compute_rhat(chains)
-    % Gelman-Rubin potential scale reduction factor.
+function diagnostics = compute_split_rhat(chains)
+    % Split-R-hat (Vehtari et al., 2021).
+    % Splits each chain into two halves before computing R-hat.
+    % This detects within-chain non-stationarity that original R-hat can miss.
+
     n_chains = length(chains);
     n_samples = size(chains{1}, 1);
     D = size(chains{1}, 2);
 
+    % Split each chain into two halves
+    n_split = 2 * n_chains;
+    half = floor(n_samples / 2);
+    split_samples = cell(n_split, 1);
+    for c = 1:n_chains
+        split_samples{2*c-1} = chains{c}(1:half, :);
+        split_samples{2*c}   = chains{c}(end-half+1:end, :);
+    end
+
     rhat = zeros(1, D);
     for d = 1:D
-        chain_means = zeros(n_chains, 1);
-        chain_vars  = zeros(n_chains, 1);
-        for c = 1:n_chains
-            chain_means(c) = mean(chains{c}(:, d));
-            chain_vars(c)  = var(chains{c}(:, d));
+        chain_means = zeros(n_split, 1);
+        chain_vars  = zeros(n_split, 1);
+        for s = 1:n_split
+            chain_means(s) = mean(split_samples{s}(:, d));
+            chain_vars(s)  = var(split_samples{s}(:, d));
         end
-        B = n_samples * var(chain_means);   % between-chain
-        W = mean(chain_vars);               % within-chain
-        V = (n_samples - 1)/n_samples * W + B/n_samples;
+        B = half * var(chain_means);
+        W = mean(chain_vars);
+        V = (half - 1)/half * W + B/half;
         rhat(d) = sqrt(V / W);
     end
     diagnostics = struct('rhat', rhat);
