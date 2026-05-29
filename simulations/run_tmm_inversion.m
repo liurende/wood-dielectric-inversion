@@ -16,6 +16,13 @@
 function run_tmm_inversion()
     clc; close all;
 
+    % ====== Start Parallel Pool ======
+    pool = gcp('nocreate');
+    if isempty(pool)
+        n_workers = min(14, feature('numCores'));
+        parpool('local', n_workers);
+    end
+
     outDir = fullfile(pwd, 'simulations', 'results');
     if ~exist(outDir, 'dir'), mkdir(outDir); end
 
@@ -89,7 +96,7 @@ function run_tmm_inversion()
 
     results_arr = cell(length(matFiles), 1);
 
-    for iF = 1:length(matFiles)
+    parfor iF = 1:length(matFiles)
         fname = matFiles(iF).name;
         [~, baseName] = fileparts(fname);
 
