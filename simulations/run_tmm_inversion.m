@@ -95,6 +95,11 @@ function run_tmm_inversion()
     n_samples_mcmc = 20000;
     adapt_int = 500;
 
+    % ====== Sample Name Translation ======
+    nameMap = containers.Map(...
+        {'0_垂直','0_平行','1_垂直','1_平行'}, ...
+        {'LargeWood_Vertical','LargeWood_Parallel','SmallWood_Vertical','SmallWood_Parallel'});
+
     % ====== Process Each Sample ======
     fprintf('%-25s %10s %10s %12s %8s\n', ...
         'Sample', 'eps_inf_E', 'eps_inf_L', 'f_relax(GHz)', 'RMS(dB)');
@@ -105,6 +110,9 @@ function run_tmm_inversion()
     parfor iF = 1:length(matFiles)
         fname = matFiles(iF).name;
         [~, baseName] = fileparts(fname);
+        if isKey(nameMap, baseName)
+            baseName = nameMap(baseName);
+        end
 
         % ---- Load and preprocess ----
         mat = load_measurement(fullfile(matFiles(iF).folder, fname));
