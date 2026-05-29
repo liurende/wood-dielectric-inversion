@@ -93,6 +93,7 @@ function plot_posterior(results, outDir, fontName, ...
 
     for iF = 1:n_samples
         rr = results(iF);
+        chains = rr.mcmc_chains;
         posterior = [];
         for c = 1:n_chains
             posterior = [posterior; chains{c}];
@@ -132,9 +133,10 @@ function plot_posterior(results, outDir, fontName, ...
     fig4 = figure('Color', 'w', 'Position', [50, 50, 1000, 700]);
 
     for iF = 1:n_samples
-        subplot(2, 2, iF);
+        subplot(ceil(n_samples/2), 2, iF);
         hold on;
         rr = results(iF);
+        chains = rr.mcmc_chains;
         fplot = rr.f_fit / 1e9;
 
         plot(fplot, 20*log10(abs(rr.S_meas)), '.', ...
